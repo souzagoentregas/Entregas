@@ -63,7 +63,7 @@
       background: var(--card-bg);
       padding: 32px;
       border-radius: var(--radius);
-      shadow: var(--shadow);
+      box-shadow: var(--shadow);
       border: 1px solid #e2e8f0;
     }
 
@@ -201,6 +201,7 @@
     <div class="campo">
       <label for="coleta">Endereço de Coleta</label>
       <input type="text" id="coleta" placeholder="Rua, número, bairro e cidade">
+      <button type="button" id="btnLocalizacao" style="background:#fff; border:1px solid var(--primary); color:var(--primary); margin-top:8px; padding:9px; font-size:13px; font-weight:600;">📍 Usar minha localização atual</button>
     </div>
 
     <div class="campo">
@@ -278,10 +279,11 @@
   async function apiFetch(url, options = {}) {
     try {
       const resp = await fetch(url, options);
-      if (!resp.ok) throw new Error(`Erro HTTP: ${resp.status}`);
-      return await resp.json();
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.description || `Erro HTTP: ${resp.status}`);
+      return data;
     } catch (e) {
-      throw new Error('Falha na conexão com o serviço. Verifique sua internet.');
+      throw new Error(e.message || 'Falha na conexão com o serviço.');
     }
   }
 
@@ -298,16 +300,53 @@
   }
 
   function calcularTarifa(km) {
-    // Regra: R$15 mínimo (até 5km) + R$3 por km adicional
     if (km <= 5) return 15;
     return 15 + (km - 5) * 3;
   }
+
+  async function geocodeReverso(lat, lng) {
+    const data = await apiFetch(`https://graphhopper.com/api/1/geocode?reverse=true&point=${lat},${lng}&locale=pt&key=${CONFIG.GH_KEY}`);
+    if (!data.hits?.length) throw new Error('Não foi possível identificar seu endereço atual.');
+    const h = data.hits[0];
+    const partes = [h.street, h.housenumber, h.city].filter(Boolean);
+    return partes.length ? partes.join(', ') : `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+  }
+
+  const btnLocalizacao = document.getElementById('btnLocalizacao');
+  btnLocalizacao.addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      DOM.erroMsg.textContent = 'Seu navegador não suporta localização automática.';
+      DOM.erroMsg.style.display = 'block';
+      return;
+    }
+
+    btnLocalizacao.disabled = true;
+    btnLocalizacao.textContent = 'Localizando...';
+    DOM.erroMsg.style.display = 'none';
+
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      try {
+        const endereco = await geocodeReverso(pos.coords.latitude, pos.coords.longitude);
+        DOM.inputs.coleta.value = endereco;
+      } catch (err) {
+        DOM.erroMsg.textContent = err.message;
+        DOM.erroMsg.style.display = 'block';
+      } finally {
+        btnLocalizacao.disabled = false;
+        btnLocalizacao.textContent = '📍 Usar minha localização atual';
+      }
+    }, () => {
+      DOM.erroMsg.textContent = 'Não foi possível acessar sua localização. Verifique as permissões do navegador.';
+      DOM.erroMsg.style.display = 'block';
+      btnLocalizacao.disabled = false;
+      btnLocalizacao.textContent = '📍 Usar minha localização atual';
+    }, { enableHighAccuracy: true, timeout: 10000 });
+  });
 
   DOM.btnCalcular.addEventListener('click', async () => {
     const vals = {};
     let temErro = false;
 
-    // Validação básica
     ['nome', 'telefone', 'coleta', 'entrega', 'pacote'].forEach(id => {
       const val = DOM.inputs[id].value.trim();
       if (!val) temErro = true;
@@ -368,6 +407,14 @@
     DOM.btnEnviar.textContent = 'Enviando pedido...';
     
     const c = ultimoCalculo;
+    
+    // 1. Limpeza do número para WhatsApp (apenas números + prefixo 55)
+    const telLimpo = "55" + c.telefone.replace(/\D/g, '');
+    const linkWhats = `https://wa.me/${telLimpo}`;
+
+    // 2. Link do Google Maps com Rota
+    const linkMaps = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(c.coleta)}&destination=${encodeURIComponent(c.entrega)}&travelmode=driving`;
+
     const msg = `📦 *NOVO PEDIDO DE ENTREGA*\n\n` +
                 `👤 *Cliente:* ${c.nome}\n` +
                 `📱 *WhatsApp:* ${c.telefone}\n\n` +
@@ -378,6 +425,14 @@
                 `\n📏 *Distância:* ${c.kmIda.toFixed(1)} km ${c.comRetorno ? '(c/ retorno)' : ''}\n` +
                 `💰 *Valor:* R$ ${c.valor.toFixed(2).replace('.', ',')}`;
 
+    // 3. Montagem do Teclado Inline
+    const inlineKeyboard = {
+      inline_keyboard: [
+        [{ text: "📍 Ver rota no mapa", url: linkMaps }],
+        [{ text: "💬 Chamar cliente no WhatsApp", url: linkWhats }]
+      ]
+    };
+
     try {
       await apiFetch(`https://api.telegram.org/bot${CONFIG.TG_TOKEN}/sendMessage`, {
         method: 'POST',
@@ -385,7 +440,8 @@
         body: JSON.stringify({
           chat_id: CONFIG.TG_CHAT_ID,
           text: msg,
-          parse_mode: 'Markdown'
+          parse_mode: 'Markdown',
+          reply_markup: inlineKeyboard
         })
       });
 
@@ -394,7 +450,7 @@
       DOM.btnEnviar.style.display = 'none';
       DOM.btnCalcular.style.display = 'none';
     } catch (err) {
-      DOM.erroMsg.textContent = 'Erro ao enviar para o sistema. Tente novamente.';
+      DOM.erroMsg.textContent = 'Erro ao enviar para o sistema: ' + err.message;
       DOM.erroMsg.style.display = 'block';
       DOM.btnEnviar.disabled = false;
       DOM.btnEnviar.textContent = 'Confirmar e Enviar Pedido';
