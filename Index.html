@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Solicitar Entrega | Logística Rápida</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+  <!-- Google Maps API -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyD0ve7bSErc4IdQiKauXjBlSs8KVwVo8O8&libraries=places,geometry"></script>
   <style>
     :root {
       --primary: #2563eb;
@@ -170,6 +172,26 @@
     .painel .total { margin-top: 12px; padding-top: 12px; border-top: 2px solid rgba(255,255,255,0.2); }
     .painel .total .valor { font-size: 28px; }
 
+    /* Autocomplete dropdown */
+    .pac-container {
+      background-color: var(--card-bg);
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      margin-top: 4px;
+      z-index: 1000;
+    }
+
+    .pac-item {
+      padding: 12px 16px;
+      font-size: 14px;
+      cursor: pointer;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    .pac-item:hover {
+      background-color: #f1f5f9;
+    }
+
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
 
@@ -251,7 +273,7 @@
 <script>
   // Configurações (Nota: Em produção, chaves de API devem ficar no servidor)
   const CONFIG = {
-    GH_KEY: '76d351a7-1465-4aad-8c30-b6fdc17eb28b',
+    GOOGLE_MAPS_KEY: 'AIzaSyD0ve7bSErc4IdQiKauXjBlSs8KVwVo8O8',
     TG_TOKEN: '8909969423:AAGkMM8bHtE5cD2hycD87HSpyL7zXFHoJgY',
     TG_CHAT_ID: '7382480510'
   };
@@ -269,6 +291,41 @@
   };
 
   let ultimoCalculo = null;
+  let geocoder = null;
+  let directionsService = null;
+
+  // Inicializar Google Maps Services
+  function initGoogleMaps() {
+    geocoder = new google.maps.Geocoder();
+    directionsService = new google.maps.DirectionsService();
+    setupAutocomplete();
+  }
+
+  // Configurar autocomplete para os campos de endereço
+  function setupAutocomplete() {
+    const options = {
+      componentRestrictions: { country: 'br' },
+      types: ['address']
+    };
+
+    const autocompleteColeta = new google.maps.places.Autocomplete(DOM.inputs.coleta, options);
+    const autocompleteEntrega = new google.maps.places.Autocomplete(DOM.inputs.entrega, options);
+
+    // Listener para capturar o endereço selecionado
+    autocompleteColeta.addListener('place_changed', () => {
+      const place = autocompleteColeta.getPlace();
+      if (place.geometry) {
+        coletaGPS = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() };
+      }
+    });
+
+    autocompleteEntrega.addListener('place_changed', () => {
+      const place = autocompleteEntrega.getPlace();
+      if (place.geometry) {
+        entregaGPS = { lat: place.geometry.location.lat(), lng: place.geometry.location.lng() };
+      }
+    });
+  }
 
   // Máscara simples para telefone
   DOM.inputs.telefone.addEventListener('input', (e) => {
@@ -287,16 +344,44 @@
     }
   }
 
+  // Geocodificar endereço usando Google Geocoding API
   async function geocode(address) {
-    const data = await apiFetch(`https://graphhopper.com/api/1/geocode?q=${encodeURIComponent(address)}&locale=pt&limit=1&key=${CONFIG.GH_KEY}`);
-    if (!data.hits?.length) throw new Error(`Endereço não localizado: ${address}`);
-    return data.hits[0].point;
+    return new Promise((resolve, reject) => {
+      geocoder.geocode({ address: address, region: 'br' }, (results, status) => {
+        if (status === 'OK' && results.length > 0) {
+          const location = results[0].geometry.location;
+          resolve({
+            lat: location.lat(),
+            lng: location.lng(),
+            formattedAddress: results[0].formatted_address
+          });
+        } else {
+          reject(new Error(`Endereço não localizado: ${address}`));
+        }
+      });
+    });
   }
 
+  // Calcular rota usando Google Directions API
   async function getRoute(p1, p2) {
-    const data = await apiFetch(`https://graphhopper.com/api/1/route?point=${p1.lat},${p1.lng}&point=${p2.lat},${p2.lng}&vehicle=car&key=${CONFIG.GH_KEY}`);
-    if (!data.paths?.length) throw new Error('Não foi possível traçar uma rota entre os pontos.');
-    return data.paths[0].distance / 1000;
+    return new Promise((resolve, reject) => {
+      const request = {
+        origin: new google.maps.LatLng(p1.lat, p1.lng),
+        destination: new google.maps.LatLng(p2.lat, p2.lng),
+        travelMode: 'DRIVING',
+        unitSystem: google.maps.UnitSystem.METRIC
+      };
+
+      directionsService.route(request, (result, status) => {
+        if (status === 'OK' && result.routes.length > 0) {
+          // Retorna a distância em km
+          const distanceInMeters = result.routes[0].legs[0].distance.value;
+          resolve(distanceInMeters / 1000);
+        } else {
+          reject(new Error('Não foi possível traçar uma rota entre os pontos.'));
+        }
+      });
+    });
   }
 
   function calcularTarifa(km) {
@@ -305,6 +390,7 @@
   }
 
   let coletaGPS = null;
+  let entregaGPS = null;
 
   const btnLocalizacao = document.getElementById('btnLocalizacao');
   btnLocalizacao.addEventListener('click', () => {
@@ -334,7 +420,7 @@
 
   // Se o cliente editar o campo manualmente, volta a usar geocodificação normal por texto
   DOM.inputs.coleta.addEventListener('input', () => {
-    if(coletaGPS) coletaGPS = null;
+    if(coletaGPS && !DOM.inputs.coleta.value.includes('📍')) coletaGPS = null;
   });
 
   DOM.btnCalcular.addEventListener('click', async () => {
@@ -361,10 +447,9 @@
     DOM.btnCalcular.textContent = 'Calculando rota...';
 
     try {
-      const [ptColeta, ptEntrega] = await Promise.all([
-        coletaGPS ? Promise.resolve(coletaGPS) : geocode(vals.coleta),
-        geocode(vals.entrega)
-      ]);
+      // Se temos GPS da coleta ou autocomplete, usar; senão geocodificar
+      const ptColeta = coletaGPS || (await geocode(vals.coleta));
+      const ptEntrega = entregaGPS || (await geocode(vals.entrega));
 
       const kmIda = await getRoute(ptColeta, ptEntrega);
       const comRetorno = DOM.inputs.retorno.checked;
@@ -383,7 +468,7 @@
       DOM.painel.style.display = 'block';
       DOM.btnEnviar.style.display = 'block';
 
-      ultimoCalculo = { ...vals, obs: DOM.inputs.obs.value, kmIda, comRetorno, valor, coletaGPS };
+      ultimoCalculo = { ...vals, obs: DOM.inputs.obs.value, kmIda, comRetorno, valor, coletaGPS: ptColeta };
 
     } catch (err) {
       DOM.erroMsg.textContent = err.message;
@@ -441,17 +526,33 @@
         })
       });
 
-      DOM.sucessoMsg.textContent = 'Pedido enviado com sucesso! Aguarde nosso contato.';
+      DOM.sucessoMsg.textContent = '✅ Pedido enviado com sucesso! Você receberá uma confirmação em breve.';
       DOM.sucessoMsg.style.display = 'block';
       DOM.btnEnviar.style.display = 'none';
-      DOM.btnCalcular.style.display = 'none';
+
+      setTimeout(() => {
+        ['nome', 'telefone', 'coleta', 'entrega', 'pacote', 'obs'].forEach(id => {
+          DOM.inputs[id].value = '';
+        });
+        DOM.inputs.retorno.checked = false;
+        DOM.painel.style.display = 'none';
+        DOM.sucessoMsg.style.display = 'none';
+        ultimoCalculo = null;
+        coletaGPS = null;
+        entregaGPS = null;
+      }, 3000);
+
     } catch (err) {
-      DOM.erroMsg.textContent = 'Erro ao enviar para o sistema: ' + err.message;
+      DOM.erroMsg.textContent = 'Erro ao enviar pedido: ' + err.message;
       DOM.erroMsg.style.display = 'block';
+    } finally {
       DOM.btnEnviar.disabled = false;
       DOM.btnEnviar.textContent = 'Confirmar e Enviar Pedido';
     }
   });
+
+  // Inicializar Google Maps quando a página carregar
+  window.addEventListener('load', initGoogleMaps);
 </script>
 
 </body>
